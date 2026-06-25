@@ -2,11 +2,10 @@
 """
 01 · 采集 (eye_in_hand / eye_to_hand)。
 
-半自动流程：操作者用示教器把机械臂摆到不同位姿（绕 ≥2 个不平行轴旋转、
-规避 RM65-B 奇异点），到位停稳后按回车，脚本自动：
-  1. 读取当前法兰位姿 [x,y,z,rx,ry,rz] → T_base_flange
-  2. 触发一帧 RGB（已对齐深度）
-  3. CharUco 检测；成功则保存 图像 + 位姿 + 检测信息
+实时预览（默认）：打开图像窗口，连续显示画面 + CharUco 角点叠层 + 状态提示
+（绿“OK 角点数/板距”或红“ADJUST 角点不足”），操作者摆好位姿、看到角点全绿后按
+【空格/回车】采集，【q/ESC】结束保存。这样可在采集前确认标定板是否在视野内。
+无图形界面(--headless)时回退为输入提示式。
 
 用法:
   python scripts/01_collect.py --mode eye_in_hand            # 相机 A(5459) 眼在手上
@@ -81,70 +80,115 @@ def run(args):
     out_dir.mkdir(parents=True, exist_ok=True)
     samples = []
     idx = 1
-    tried = 0
-    while len(samples) < args.n:
-        print(f"\n--- 第 {len(samples)+1}/{args.n} 个有效样本 (已尝试 {tried}) ---")
-        print("布板提示:")
-        if args.mode == "eye_in_hand":
-            print("  标定板固定在桌面不动；摆动末端相机，使板始终在视野内，")
-        else:
-            print("  标定板已固定在末端夹爪(随臂动)；俯视相机 B 不动，板在视野内，")
-        print("  位姿需绕 ≥2 个不平行轴有旋转，|q3|、|q5|>20°。摆好后回车。")
-        cmd = input("回车=采集  s=跳过本姿态  q=结束保存: ").strip().lower()
-        if cmd == "q":
-            break
-        if cmd == "s":
-            tried += 1
-            continue
 
-        # 等停稳后读位姿
-        time.sleep(C.SETTLE_TIME_S)
+    board_hint = ("标定板固定在桌面；摆动末端相机，使板始终在视野内" if args.mode == "eye_in_hand"
+                  else "标定板夹在末端夹爪(随臂动)；俯视相机 B 固定，板在视野内")
+    print(f"\n布板：{board_hint}")
+    print("位姿要求：绕 ≥2 个不平行轴旋转，|q3|、|q5|>20°，板距 0.3–0.8m。")
+
+    def overlay(frame, corners, ids, n_done, n_tgt, dist_mm, warn):
+        vis = draw_detected(frame, corners, ids) if corners is not None else frame.copy()
+        n = len(corners) if corners is not None else 0
+        ok = n >= C.MIN_CHARUCO_CORNERS
+        msg = (f"OK  {n} pts  (dist~{dist_mm:.0f}mm)" if ok
+               else f"ADJUST  {n}/{C.MIN_CHARUCO_CORNERS} pts")
+        col = (0, 200, 0) if ok else (0, 0, 255)
+        cv2.rectangle(vis, (0, 0), (vis.shape[1], 60), (0, 0, 0), -1)
+        cv2.putText(vis, msg, (16, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.1, col, 3)
+        cv2.putText(vis, f"captured {n_done}/{n_tgt}", (vis.shape[1] - 230, 42),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(vis, "[Space/Enter]capture   [s]skip   [q/ESC]quit",
+                    (16, vis.shape[0] - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
+        if warn:
+            cv2.putText(vis, "WARN: " + warn, (16, 88),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 140, 255), 2)
+        return vis
+
+    def do_capture(color_cap, corners_cap, ids_cap, ts_cap):
+        nonlocal idx
         joints, pose = arm.get_state()
-
-        # 安全校验（仅告警，不阻断）
         ok_s, msg_s = check_singularity(joints)
         ok_l, msg_l = check_joint_limits(joints)
         if not ok_s:
             print("  [!] 奇异风险:", msg_s)
         if not ok_l:
             print("  [!] 关节超限:", msg_l)
-
-        # 采图 + 检测
-        color, depth, ts = cam.grab()
-        corners, ids = detect(detector, color)
-        if corners is None:
-            print(f"  [x] 未检测到足够 CharUco 角点(<{C.MIN_CHARUCO_CORNERS})，丢弃，换姿态重试。")
-            tried += 1
-            continue
-
-        # 计算板位姿（即时反馈，解算阶段会重算）
-        T_cam_board = estimate_pose(board, corners, ids, intr)
+        T_cam_board = estimate_pose(board, corners_cap, ids_cap, intr)
         meta = {
-            "idx": idx,
-            "serial": serial,
-            "mode": args.mode,
+            "idx": idx, "serial": serial, "mode": args.mode,
             "pose": [float(v) for v in pose],
             "joints_deg": [float(v) for v in joints],
-            "pose_unit": C.POSE_RPY_UNIT,
-            "pose_order": C.POSE_RPY_ORDER,
-            "n_corners": int(len(corners)),
-            "timestamp": float(ts),
+            "pose_unit": C.POSE_RPY_UNIT, "pose_order": C.POSE_RPY_ORDER,
+            "n_corners": int(len(corners_cap)), "timestamp": float(ts_cap),
         }
-        img_path, meta_path = save_sample(out_dir, idx, color, meta)
+        img_path, meta_path = save_sample(out_dir, idx, color_cap, meta)
+        cv2.imwrite(str(out_dir / f"{idx:04d}_vis.png"),
+                    draw_detected(color_cap, corners_cap.reshape(-1, 1, 2), ids_cap))
         samples.append({
             "idx": idx, "image": str(img_path.relative_to(C.ROOT)),
             "meta": str(meta_path.relative_to(C.ROOT)),
             "pose": meta["pose"], "joints_deg": meta["joints_deg"],
             "n_corners": meta["n_corners"],
         })
-        # 可视化留档 + 实时预览
-        vis = draw_detected(color, corners.reshape(-1, 1, 2), ids)
-        cv2.imwrite(str(out_dir / f"{idx:04d}_vis.png"), vis)
-        if not args.headless:
-            cv2.imshow("collect", vis)
-            cv2.waitKey(1)
-        print(f"  [v] 已保存 #{idx}：角点={len(corners)}，板距≈{np.linalg.norm(T_cam_board[:3,3])*1000:.0f} mm")
+        print(f"  [v] #{idx}: 角点={len(corners_cap)} 板距≈{np.linalg.norm(T_cam_board[:3,3])*1000:.0f}mm")
         idx += 1
+
+    if args.headless:
+        # 无图形界面回退：输入提示式（看不到画面）
+        tried = 0
+        while len(samples) < args.n:
+            print(f"\n--- 第 {len(samples)+1}/{args.n} 个有效样本 (已尝试 {tried}) ---")
+            cmd = input("回车=采集  s=跳过  q=结束: ").strip().lower()
+            if cmd == "q":
+                break
+            if cmd == "s":
+                tried += 1
+                continue
+            time.sleep(C.SETTLE_TIME_S)
+            color, _d, ts = cam.grab()
+            corners, ids = detect(detector, color)
+            if corners is None:
+                print(f"  [x] 角点不足(<{C.MIN_CHARUCO_CORNERS})，丢弃重试。")
+                tried += 1
+                continue
+            do_capture(color, corners, ids, ts)
+    else:
+        # 实时预览：连续显示画面+检测叠层，按键采集
+        print("\n[实时预览] 图像窗口已打开。摆好姿态、角点全绿后按【空格/回车】采集；q/ESC 结束保存。")
+        win = "collect-live  (Space=采集  s=跳过  q/ESC=结束)"
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        while len(samples) < args.n:
+            color, _d, ts = cam.grab(warmup_frames=0)
+            corners, ids = detect(detector, color)
+            n = len(corners) if corners is not None else 0
+            ok = corners is not None and n >= C.MIN_CHARUCO_CORNERS
+            if corners is not None:
+                dist_mm = np.linalg.norm(estimate_pose(board, corners, ids, intr)[:3, 3]) * 1000
+            else:
+                dist_mm = 0.0
+            warn = ""
+            try:   # 实时奇异/限位预警（轻量读取，失败不中断）
+                joints, _ = arm.get_state()
+                _s, ms = check_singularity(joints)
+                _l, ml = check_joint_limits(joints)
+                warn = "  ".join(ms + ml)
+            except Exception:
+                pass
+            cv2.imshow(win, overlay(color, corners, ids, len(samples), args.n, dist_mm, warn))
+            key = cv2.waitKey(25) & 0xFF
+            if key in (ord("q"), 27):            # q / ESC
+                break
+            if key in (ord(" "), 13, 10):        # 空格 / 回车
+                if not ok:
+                    print("  [x] 角点不足，未保存；调整后重按空格。")
+                    continue
+                time.sleep(0.3)                  # 等手松开/停稳
+                color2, _d2, ts2 = cam.grab(warmup_frames=1)
+                c2, i2 = detect(detector, color2)
+                if c2 is None:
+                    print("  [x] 采集瞬间检测失败，未保存。")
+                    continue
+                do_capture(color2, c2, i2, ts2)
 
     # 汇总
     manifest = {
