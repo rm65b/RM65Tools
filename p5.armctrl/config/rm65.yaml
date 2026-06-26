@@ -1,0 +1,73 @@
+# RM65 6自由度机械臂配置文件
+# RM65 6-DOF Robotic Arm Configuration
+
+robot:
+  name: "RM65"
+  dof: 6
+  manufacturer: "generic"
+
+# 关节限位 (单位: 度)
+# Joint limits (in degrees)
+joint_limits:
+  j1:
+    min: -180.0
+    max: 180.0
+    unit: "deg"
+  j2:
+    min: -130.0
+    max: 130.0
+    unit: "deg"
+  j3:
+    min: -135.0
+    max: 135.0
+    unit: "deg"
+  j4:
+    min: -180.0
+    max: 180.0
+    unit: "deg"
+  j5:
+    min: -128.0
+    max: 128.0
+    unit: "deg"
+  j6:
+    min: -360.0
+    max: 360.0
+    unit: "deg"
+
+# 关节零点偏置 (可选)
+# Joint zero offset (optional)
+joint_offset:
+  j1: 0.0
+  j2: 0.0
+  j3: 0.0
+  j4: 0.0
+  j5: 0.0
+  j6: 0.0
+
+# DH 参数 (可选, 用于运动学)
+# DH parameters (optional, for kinematics)
+# dh_params:
+#   a: [0, 0, 0, 0, 0, 0]      # 连杆长度 (m)
+#   alpha: [0, 0, 0, 0, 0, 0]   # 连杆扭转角 (deg)
+#   d: [0, 0, 0, 0, 0, 0]       # 连杆偏距 (m)
+#   theta: [0, 0, 0, 0, 0, 0]   # 关节角度 (deg)
+
+# 最大速度 (可选)
+# Maximum velocity (optional, in deg/s)
+max_velocity:
+  j1: 60.0
+  j2: 60.0
+  j3: 60.0
+  j4: 60.0
+  j5: 60.0
+  j6: 60.0
+
+# 最大加速度 (可选)
+# Maximum acceleration (optional, in deg/s^2)
+max_acceleration:
+  j1: 100.0
+  j2: 100.0
+  j3: 100.0
+  j4: 100.0
+  j5: 100.0
+  j6: 100.0
