@@ -1,5 +1,5 @@
 eye_hand_data/
 __pycache__/
-hand_eye_result.npz
+hand_eye_result*.npz
 libs/web-log
 

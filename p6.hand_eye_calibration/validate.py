@@ -3,7 +3,8 @@
 """
 手眼标定精度验证程序
 
-读取 compute.py 保存的标定结果 (hand_eye_result.npz)，把相机坐标系下的一个点
+读取 compute.py 保存的标定结果 (hand_eye_result_eye_in_hand.npz /
+hand_eye_result_eye_to_hand.npz，按模式分文件、互不覆盖)，把相机坐标系下的一个点
 转换到机械臂基坐标系，控制机械臂先到正上方、再垂直下放，使夹爪尖端到达该点附近，
 并报告尖端实际位置与目标的偏差，以此验证手眼标定精度。
 
@@ -11,6 +12,7 @@
   eye_to_hand(眼在手外): p_base = R_cam2base @ p_cam + t_cam2base
   eye_in_hand(眼在手上): 读取当前末端位姿,
                          p_base = T_end2base @ (R_cam2end @ p_cam + t_cam2end)
+  模式默认读 config.yaml 的 calib_mode(可用 --mode 覆盖)。
 
 接近姿态:
   默认沿用机械臂"当前姿态"（不强制夹爪垂直，运动为纯平移）；
@@ -36,11 +38,49 @@ import time
 import argparse
 import socket
 
+import yaml
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RESULT_FILE = os.path.join(BASE_DIR, "hand_eye_result.npz")
+RESULT_FILES = {
+    "eye_in_hand": os.path.join(BASE_DIR, "hand_eye_result_eye_in_hand.npz"),
+    "eye_to_hand": os.path.join(BASE_DIR, "hand_eye_result_eye_to_hand.npz"),
+}
+CONFIG_FILE = os.path.join(BASE_DIR, "config.yaml")
+
+
+def read_config_mode():
+    """读取 config.yaml 的 calib_mode 作为当前工作模式；读不到或非法时返回 None。"""
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            mode = (yaml.safe_load(f) or {}).get("calib_mode")
+    except Exception:
+        return None
+    return mode if mode in RESULT_FILES else None
+
+
+def resolve_result_file(mode_arg=None, config_mode=None):
+    """确定标定结果 npz：--mode > config.yaml > 仅存在一个时自动选用；两个都在且未指定则报错。
+
+    返回 (文件路径, 模式)。
+    """
+    chosen = mode_arg or config_mode
+    if chosen:
+        f = RESULT_FILES[chosen]
+        if not os.path.exists(f):
+            print(f"找不到 {chosen} 标定结果 {f}，请先运行: python compute.py --mode {chosen}")
+            sys.exit(1)
+        return f, chosen
+    existing = {m: f for m, f in RESULT_FILES.items() if os.path.exists(f)}
+    if len(existing) == 1:
+        return next(iter(existing.items()))
+    if not existing:
+        print(f"找不到任何标定结果文件(预期 {list(RESULT_FILES.values())})，请先运行 compute.py。")
+        sys.exit(1)
+    print("config.yaml 未设定有效 calib_mode，且两种结果都存在；"
+          "请在 config.yaml 设定 calib_mode 或用 --mode 指定。")
+    sys.exit(1)
 
 
 class ArmClient:
@@ -153,6 +193,8 @@ def main():
     ap.add_argument("--speed", type=int, default=20, help="运动速度百分比, 默认20")
     ap.add_argument("--rpy", nargs=3, type=float, default=None, metavar=("RX", "RY", "RZ"),
                     help="接近姿态(弧度), 默认沿用当前姿态(不强制夹爪垂直)")
+    ap.add_argument("--mode", choices=["eye_in_hand", "eye_to_hand"], default=None,
+                    help="选择要验证的标定结果(默认自动选用仅存在的那一个)")
     ap.add_argument("--ip", default="192.168.1.18")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--dry-run", action="store_true", help="只计算并打印目标, 不运动")
@@ -164,13 +206,15 @@ def main():
         cam = [float(v) for v in s]
     p_cam = np.array(cam, dtype=float)
 
-    # 1) 读取标定结果
-    if not os.path.exists(RESULT_FILE):
-        print(f"找不到标定结果文件 {RESULT_FILE}，请先运行 compute.py。")
-        sys.exit(1)
-    d = np.load(RESULT_FILE)
+    # 1) 读取标定结果（按模式分文件存放，互不覆盖）。模式默认取 config.yaml
+    config_mode = read_config_mode()
+    result_file, sel_mode = resolve_result_file(args.mode, config_mode)
+    src = ("--mode" if args.mode else "config.yaml" if config_mode else "自动")
+    d = np.load(result_file)
     R_he, t_he, mode = d["R"], d["t"], str(d["mode"])
-    print(f"标定结果模式: {mode}")
+    if sel_mode is not None and mode != sel_mode:
+        print(f"警告：选择模式({src})={sel_mode} 但文件内模式为 {mode}，以文件内模式为准。")
+    print(f"标定结果文件: {os.path.basename(result_file)} | 模式: {mode} (来源: {src})")
 
     # 2) 按需读取当前位姿：eye_in_hand 计算 p_base 必需；接近姿态默认沿用当前也必需
     arm = None

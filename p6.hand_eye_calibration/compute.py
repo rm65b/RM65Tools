@@ -163,7 +163,10 @@ if __name__ == '__main__':
     logger_.info(f"四元数是(x,y,z,w):\n {quaternion}")
 
     # 保存标定结果(R, t, 四元数, 模式)供 validate.py 精度验证使用
-    np.savez(os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_eye_result.npz"),
+    # eye_in_hand 与 eye_to_hand 用不同文件名，互不覆盖
+    result_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               f"hand_eye_result_{calib_mode}.npz")
+    np.savez(result_file,
              R=rotation_matrix, t=translation_vector.flatten(),
              quaternion=quaternion, mode=calib_mode)
-    logger_.info("标定结果已保存到 hand_eye_result.npz")
+    logger_.info(f"标定结果已保存到 {os.path.basename(result_file)}")
